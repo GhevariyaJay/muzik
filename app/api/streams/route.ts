@@ -68,7 +68,7 @@ export async function GET(req: NextRequest) {
         });
 
         return NextResponse.json({ 
-            streams: streams.map(stream => ({
+            streams: streams.map((stream: any) => ({
                 ...stream,
                 votes: stream._count.upvotes - stream._count.downvotes
             })).sort((a, b) => b.votes - a.votes)
