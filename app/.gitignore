@@ -8,3 +8,5 @@ coverage
 .env.production
 .env.development
 .DS_Store
+.vercel
+.turbo
