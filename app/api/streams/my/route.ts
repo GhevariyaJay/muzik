@@ -41,12 +41,15 @@ export async function GET(req: NextRequest) {
         });
 
         return NextResponse.json({
-            streams: streams.map(({ _count, ...res }) => ({
-                ...res,
-                votes: _count.upvotes - _count.downvotes,
-                haveUpvoted: res.upvotes.length > 0,
-                haveDownvoted: res.downvotes.length > 0
-            }))
+            streams: streams.map((stream: any) => {
+                const { _count, ...res } = stream;
+                return {
+                    ...res,
+                    votes: _count.upvotes - _count.downvotes,
+                    haveUpvoted: res.upvotes.length > 0,
+                    haveDownvoted: res.downvotes.length > 0
+                };
+            })
         });
     } catch (e) {
         console.error("API Error:", e);
