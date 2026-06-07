@@ -16,6 +16,7 @@ model User {
 
   streams  Stream[]
   upvotes  Upvote[]
+  downvotes Downvote[]
 }
 
 model Stream {
@@ -24,13 +25,27 @@ model Stream {
   url         String
   extractedId String
   active      Boolean  @default(true)
+  played      Boolean  @default(false)
+  playedAt    DateTime?
 
   userId      String
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   upvotes     Upvote[]
+  downvotes   Downvote[]
 }
 
 model Upvote {
+  id       String @id @default(uuid())
+  userId   String
+  streamId String
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  stream Stream @relation(fields: [streamId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, streamId])
+}
+
+model Downvote {
   id       String @id @default(uuid())
   userId   String
   streamId String

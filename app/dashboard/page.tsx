@@ -1,8 +1,9 @@
 "use client";
-
-import { useMemo, useState, useEffect } from "react";
-
+import { useMemo, useState, useEffect, useRef } from "react";
+import axios from "axios";
+import { useSession } from "next-auth/react";
 import { Appbar } from "../components/Appbar";
+
 type Song = {
   id: string;
   title: string;
@@ -11,6 +12,14 @@ type Song = {
   votes: number;
   submittedBy: string;
 };
+
+// YouTube Player API Types
+declare global {
+  interface Window {
+    onYouTubeIframeAPIReady: () => void;
+    YT: any;
+  }
+}
 
 function extractYouTubeVideoId(url: string) {
   try {
@@ -26,96 +35,160 @@ function extractYouTubeVideoId(url: string) {
 function thumbnail(videoId: string) {
   return `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
 }
-const REFERESH_INTERVAL_MS = 10*1000;
+const REFRESH_INTERVAL_MS = 2000; // 2 seconds for "real-time" feel
 
 export default function StreamVotePage() {
+  const { data: session } = useSession();
   const [title, setTitle] = useState("");
   const [url, setUrl] = useState("");
-  const [songs, setSongs] = useState<Song[]>([
-    {
-      id: "1",
-      title: "Lofi Study Mix",
-      url: "https://www.youtube.com/watch?v=jfKfPfyJRdk",
-      videoId: "jfKfPfyJRdk",
-      votes: 24,
-      submittedBy: "Ava",
-    },
-    {
-      id: "2",
-      title: "Dreams in Motion",
-      url: "https://www.youtube.com/watch?v=5qap5aO4i9A",
-      videoId: "5qap5aO4i9A",
-      votes: 18,
-      submittedBy: "Noah",
-    },
-    {
-      id: "3",
-      title: "Midnight Drive",
-      url: "https://www.youtube.com/watch?v=3JZ4pnNtyxQ",
-      videoId: "3JZ4pnNtyxQ",
-      votes: 12,
-      submittedBy: "Mia",
-    },
-  ]);
-  const [currentId, setCurrentId] = useState("1");
-  useEffect(()=> {
+  const [songs, setSongs] = useState<Song[]>([]);
+  const videoPlayerRef = useRef<any>(null);
+
+  const refreshStreams = async () => {
+    try {
+      const creatorId = (session?.user as any)?.id;
+      if (!creatorId) return;
+
+      const res = await axios.get(`/api/streams?creatorId=${creatorId}`);
+      const streams = res.data.streams.map((s: any) => ({
+        id: s.id,
+        title: "Youtube Video",
+        url: s.url,
+        videoId: s.extractedId,
+        votes: s.votes,
+        submittedBy: "User",
+      }));
+      setSongs(streams);
+    } catch (e) {
+      console.error("Error refreshing streams", e);
+    }
+  };
+
+  useEffect(() => {
     refreshStreams();
-    const interval = setInterval(()=> {
+    const interval = setInterval(refreshStreams, REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [session]);
 
-    }, REFERESH_INTERVAL_MS)
-  },[])
-
-  const previewVideoId = extractYouTubeVideoId(url);
-  const currentSong = songs.find((s) => s.id === currentId) || songs[0];
+  const currentSong = songs[0]; // Always play the top voted song
 
   const queue = useMemo(() => {
-    return [...songs]
-      .filter((s) => s.id !== currentId)
-      .sort((a, b) => b.votes - a.votes);
-  }, [songs, currentId]);
+    return songs.slice(1); // Rest of the items are the queue
+  }, [songs]);
 
-  function addSong() {
-    if (!previewVideoId) return;
+  // Handle Automatic Playback
+  useEffect(() => {
+    if (!currentSong || videoPlayerRef.current) return;
 
-    const newSong: Song = {
-      id: crypto.randomUUID(),
-      title: title.trim() || "Untitled Song",
-      url,
-      videoId: previewVideoId,
-      votes: 0,
-      submittedBy: "You",
+    // Load YouTube API
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    // Ensure we don't add multiple script tags
+    if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+      const firstScriptTag = document.getElementsByTagName("script")[0];
+      firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
+    }
+
+    const initPlayer = () => {
+      if (videoPlayerRef.current) return;
+      videoPlayerRef.current = new window.YT.Player("youtube-player", {
+        height: "100%",
+        width: "100%",
+        videoId: currentSong.videoId,
+        playerVars: {
+          autoplay: 1,
+          controls: 1,
+          origin: window.location.origin,
+          host: 'https://www.youtube.com'
+        },
+        events: {
+          onStateChange: (event: any) => {
+            if (event.data === window.YT.PlayerState.ENDED) {
+              handleVideoEnd();
+            }
+          },
+        },
+      });
     };
 
-    setSongs((prev) => [newSong, ...prev]);
-    setCurrentId((prev) => prev ?? newSong.id);
-    setTitle("");
-    setUrl("");
+    if (window.YT && window.YT.Player) {
+      initPlayer();
+    } else {
+      window.onYouTubeIframeAPIReady = initPlayer;
+    }
+  }, [currentSong]);
+
+  // Sync player with currentSong if it changes
+  useEffect(() => {
+    if (videoPlayerRef.current && currentSong) {
+      const currentVideoId = videoPlayerRef.current.getVideoData?.()?.video_id;
+      if (currentVideoId !== currentSong.videoId) {
+        videoPlayerRef.current.loadVideoById(currentSong.videoId);
+      }
+    }
+  }, [currentSong]);
+
+  const handleVideoEnd = async () => {
+    try {
+      // Mark current song as played
+      if (currentSong) {
+        await axios.post("/api/streams/next"); // Endpoint marks top as played
+        refreshStreams();
+      }
+    } catch (e) {
+      console.error("Error advancing to next song", e);
+    }
+  };
+
+  async function addSong() {
+    if (!previewVideoId || !session?.user) return;
+
+    try {
+      await axios.post("/api/streams", {
+        creatorId: (session.user as any).id,
+        url: url,
+      });
+      setTitle("");
+      setUrl("");
+      refreshStreams();
+    } catch (e) {
+      console.error("Error adding song", e);
+    }
   }
 
-  function vote(songId: string, delta: number) {
-    setSongs((prev) =>
-      prev.map((song) =>
-        song.id === songId ? { ...song, votes: song.votes + delta } : song
-      )
+  async function vote(streamId: string, isUpvote: boolean) {
+    try {
+      await axios.post(`/api/streams/${isUpvote ? "upvotes" : "downvotes"}`, {
+        streamId,
+      });
+      refreshStreams();
+    } catch (e) {
+      console.error("Error voting", e);
+    }
+  }
+
+  const previewVideoId = extractYouTubeVideoId(url);
+
+  if (!session) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <p className="text-xl font-semibold">Please sign in to view the dashboard.</p>
+      </div>
     );
-  }
-
-  function playSong(songId: string) {
-    setCurrentId(songId);
   }
 
   return (
     <div className="min-h-screen bg-[#f8fafc] text-slate-900">
-        <Appbar />
+      <Appbar />
       <div className="mx-auto max-w-7xl px-4 py-6 md:px-6">
         <header className="mb-6 rounded-[30px] border border-slate-200 bg-white px-5 py-4 shadow-[0_18px_45px_rgba(15,23,42,0.05)]">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-[11px] uppercase tracking-[0.35em] text-sky-600">
-                Creator stream queue
+                Creator live stream
               </p>
               <h1 className="mt-2 text-3xl font-semibold tracking-tight">
-                Vote the next song
+                Now streaming
               </h1>
             </div>
             <div className="flex items-center gap-3">
@@ -123,7 +196,7 @@ export default function StreamVotePage() {
                 Live
               </div>
               <div className="rounded-full bg-slate-900 px-4 py-1.5 text-sm font-medium text-white">
-                {songs.length} songs
+                {songs.length} songs in queue
               </div>
             </div>
           </div>
@@ -133,48 +206,38 @@ export default function StreamVotePage() {
           <section className="rounded-[34px] border border-slate-200 bg-white p-5 shadow-[0_18px_50px_rgba(15,23,42,0.06)]">
             <div className="mb-4 flex items-center justify-between">
               <div>
-                <h2 className="text-lg font-semibold">Now playing</h2>
+                <h2 className="text-lg font-semibold">Live player</h2>
                 <p className="mt-1 text-xs text-slate-500">
-                  Main screen for the active song.
+                  Syncing across all users based on votes.
                 </p>
               </div>
-              <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 ring-1 ring-amber-100">
-                Featured
-              </span>
             </div>
 
-            <div className="overflow-hidden rounded-[30px] border border-slate-200 bg-slate-100">
-              <iframe
-                className="aspect-video w-full xl:aspect-[16/9]"
-                src={`https://www.youtube.com/embed/${currentSong.videoId}`}
-                title={currentSong.title}
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
+            <div className="overflow-hidden rounded-[30px] border border-slate-200 bg-slate-100 aspect-video">
+              <div id="youtube-player" className="w-full h-full" />
             </div>
 
-            <div className="mt-4 rounded-[26px] bg-gradient-to-r from-sky-50 via-white to-indigo-50 p-5 ring-1 ring-slate-200">
-              <p className="text-xs uppercase tracking-[0.28em] text-sky-500">
-                Current track
-              </p>
-              <h3 className="mt-2 text-2xl font-semibold tracking-tight">
-                {currentSong.title}
-              </h3>
-              <p className="mt-2 text-sm text-slate-600">
-                Submitted by {currentSong.submittedBy}
-              </p>
-              <p className="mt-1 text-sm text-slate-500">
-                {currentSong.votes} votes
-              </p>
-            </div>
+            {currentSong && (
+              <div className="mt-4 rounded-[26px] bg-gradient-to-r from-sky-50 via-white to-indigo-50 p-5 ring-1 ring-slate-200">
+                <p className="text-xs uppercase tracking-[0.28em] text-sky-500">
+                  Current track
+                </p>
+                <h3 className="mt-2 text-2xl font-semibold tracking-tight">
+                  {currentSong.title}
+                </h3>
+                <p className="mt-1 text-sm text-slate-500">
+                  {currentSong.votes} votes
+                </p>
+              </div>
+            )}
 
             <div className="mt-5 rounded-[28px] border border-slate-200 bg-white p-4">
-              <h3 className="text-sm font-semibold text-slate-700">Add a song</h3>
+              <h3 className="text-sm font-semibold text-slate-700">Add to queue</h3>
               <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_1fr_auto]">
                 <input
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
-                  placeholder="Song title"
+                  placeholder="Song title (optional)"
                   className="h-11 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-sky-300 focus:bg-white focus:ring-4 focus:ring-sky-100"
                 />
                 <input
@@ -198,7 +261,7 @@ export default function StreamVotePage() {
             <div className="mb-4">
               <h2 className="text-lg font-semibold">Voting queue</h2>
               <p className="mt-1 text-xs text-slate-500">
-                Compact cards for ranking and playback.
+                The most liked songs move to the top!
               </p>
             </div>
 
@@ -220,42 +283,26 @@ export default function StreamVotePage() {
                           <p className="truncate text-sm font-semibold text-slate-900">
                             {song.title}
                           </p>
-                          <p className="mt-0.5 text-xs text-slate-500">
-                            {song.submittedBy}
-                          </p>
                         </div>
                         <div className="rounded-2xl bg-sky-50 px-3 py-2 text-center ring-1 ring-sky-100">
                           <div className="text-lg font-semibold text-sky-700">
                             {song.votes}
                           </div>
-                          <div className="text-[10px] uppercase tracking-[0.18em] text-sky-500">
-                            score
-                          </div>
                         </div>
                       </div>
 
-                      <p className="mt-2 text-xs text-slate-400">
-                        Rank #{index + 1}
-                      </p>
-
                       <div className="mt-3 flex flex-wrap gap-2">
                         <button
-                          onClick={() => vote(song.id, 1)}
+                          onClick={() => vote(song.id, true)}
                           className="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 transition hover:bg-amber-100"
                         >
                           Like
                         </button>
                         <button
-                          onClick={() => vote(song.id, -1)}
+                          onClick={() => vote(song.id, false)}
                           className="rounded-full border border-rose-200 bg-rose-50 px-3 py-1 text-xs font-medium text-rose-700 transition hover:bg-rose-100"
                         >
                           Dislike
-                        </button>
-                        <button
-                          onClick={() => playSong(song.id)}
-                          className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700 transition hover:bg-slate-100"
-                        >
-                          Play now
                         </button>
                       </div>
                     </div>
@@ -265,7 +312,7 @@ export default function StreamVotePage() {
 
               {queue.length === 0 && (
                 <div className="rounded-[24px] border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-400">
-                  No songs in the queue yet.
+                  No more songs in the queue.
                 </div>
               )}
             </div>
@@ -276,14 +323,4 @@ export default function StreamVotePage() {
   );
 }
 
-function refreshStreams() {
-    // Fetch updated song data from API
-    fetch("/api/songs")
-      .then((res) => res.json())
-      .then((data) => setSongs(data))
-      .catch((err) => console.error("Failed to refresh streams:", err));
-}
-function setSongs(data: any): any {
-    throw new Error("Function not implemented.");
-}
 
